@@ -1,0 +1,73 @@
+# Entorno de DESARROLLO local.
+# Red bridge propia y aislada, puertos publicados al host, secrets en claro (solo dev).
+# Uso: docker compose -f docker-compose.dev.yml up -d --build
+services:
+  postgres-auth:
+    image: postgres:16-alpine
+    container_name: identity-auth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: keycloak
+      POSTGRES_PASSWORD: keycloak
+    volumes:
+      - postgres_auth_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ecosystem-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: identity-auth-keycloak
+    restart: unless-stopped
+    command: start-dev --import-realm
+    environment:
+      KEYCLOAK_ADMIN: admin
+      KEYCLOAK_ADMIN_PASSWORD: admin
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres-auth:5432/keycloak
+      KC_DB_USERNAME: keycloak
+      KC_DB_PASSWORD: keycloak
+      KC_HOSTNAME_STRICT: "false"
+      KC_HTTP_ENABLED: "true"
+    volumes:
+      - ./keycloak/realm-export:/opt/keycloak/data/import
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    networks:
+      - ecosystem-net
+
+  nestjs-orchestrator-api:
+    build: ./nestjs-orchestrator-api
+    container_name: identity-auth-nestjs-orchestrator
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: ecosystem
+      KEYCLOAK_CLIENT_ID: moodle-client
+      KEYCLOAK_CLIENT_SECRET: moodle-secret
+      KEYCLOAK_REDIRECT_URI: http://localhost:3000/auth/callback
+    ports:
+      - "3000:3000"
+    depends_on:
+      - keycloak
+    networks:
+      - ecosystem-net
+
+volumes:
+  postgres_auth_data:
+
+networks:
+  ecosystem-net:
+    driver: bridge

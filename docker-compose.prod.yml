@@ -1,0 +1,87 @@
+# Entorno de PRODUCCION.
+#
+# Pensado para convivir en el mismo VPS/EC2 con los demas repos del ecosistema
+# (Moodle, Nextcloud, Mattermost, OpenProject), todos unidos por la misma red
+# externa "ecosystem-net" y expuestos al exterior via un reverse proxy
+# (Nginx/Traefik) que tambien se une a esa red.
+#
+# Pasos previos en el servidor (una sola vez):
+#   docker network create ecosystem-net
+#   cp .env.prod.example .env.prod   # y completar los valores reales
+#
+# Uso:
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+#
+# Notas:
+# - No se publican puertos al host: el reverse proxy (fuera de este repo) se
+#   conecta a estos contenedores por nombre dentro de "ecosystem-net"
+#   (ej. proxy_pass http://identity-auth-keycloak:8080).
+# - KC_HOSTNAME debe ser el dominio publico real de Keycloak (detras de HTTPS
+#   en el proxy) para que los tokens y redirect URIs sean correctos.
+# - Todos los secrets se inyectan por variables de entorno, no quedan en este
+#   archivo ni en el realm-export.
+
+services:
+  postgres-auth:
+    image: postgres:16-alpine
+    container_name: identity-auth-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-keycloak}
+      POSTGRES_USER: ${POSTGRES_USER:-keycloak}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_auth_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-keycloak}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - ecosystem-net
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:25.0
+    container_name: identity-auth-keycloak
+    restart: always
+    command: start --optimized
+    environment:
+      KEYCLOAK_ADMIN: ${KEYCLOAK_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres-auth:5432/${POSTGRES_DB:-keycloak}
+      KC_DB_USERNAME: ${POSTGRES_USER:-keycloak}
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME}
+      KC_HOSTNAME_STRICT: "true"
+      KC_PROXY: edge
+      KC_HTTP_ENABLED: "true"
+    depends_on:
+      postgres-auth:
+        condition: service_healthy
+    networks:
+      - ecosystem-net
+
+  nestjs-orchestrator-api:
+    build: ./nestjs-orchestrator-api
+    container_name: identity-auth-nestjs-orchestrator
+    restart: always
+    environment:
+      PORT: 3000
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: https://${KEYCLOAK_HOSTNAME}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-ecosystem}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-moodle-client}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_REDIRECT_URI: https://${API_HOSTNAME}/auth/callback
+    depends_on:
+      - keycloak
+    networks:
+      - ecosystem-net
+
+volumes:
+  postgres_auth_data:
+
+networks:
+  ecosystem-net:
+    external: true
